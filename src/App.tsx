@@ -187,6 +187,130 @@ const hasIngredientMatch = (target: string, availableNames: string[]) => {
   );
 };
 
+const getMissingAmountHint = (ingredient: string): string => {
+  const trimmed = (ingredient || '').trim();
+  const quantityMatch = trimmed.match(/^(\d+(?:[./]\d+)?)\s*(cups?|cup|tbsp|tsp|g|kg|ml|l|oz|lb|cloves?|pieces?|piece|slices?)?\s+(.+)$/i);
+  if (quantityMatch) {
+    const quantity = quantityMatch[1];
+    const unit = quantityMatch[2] || 'unit';
+    return `${quantity} ${unit}`;
+  }
+
+  return 'Approx 1 unit';
+};
+
+const getShoppingEstimate = (ingredient: string): { quantity: number; unit: string } => {
+  const trimmed = (ingredient || '').trim();
+  const quantityMatch = trimmed.match(/^(\d+(?:[./]\d+)?)\s*(cups?|cup|tbsp|tsp|g|kg|ml|l|oz|lb|cloves?|pieces?|piece|slices?)?\s+(.+)$/i);
+  if (!quantityMatch) {
+    return { quantity: 1, unit: 'unit' };
+  }
+
+  const raw = quantityMatch[1];
+  const unit = quantityMatch[2] || 'unit';
+
+  let quantity = 1;
+  if (raw.includes('/')) {
+    const [a, b] = raw.split('/').map(Number);
+    quantity = b ? a / b : a;
+  } else {
+    quantity = Number(raw);
+  }
+
+  return {
+    quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+    unit,
+  };
+};
+
+const formatSmartQuantity = (value: number): string => {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  const rounded = Math.round(value * 100) / 100;
+
+  const fractionMap: Array<[number, string]> = [
+    [0.25, '1/4'],
+    [0.33, '1/3'],
+    [0.5, '1/2'],
+    [0.67, '2/3'],
+    [0.75, '3/4'],
+  ];
+
+  const whole = Math.floor(rounded);
+  const decimal = Number((rounded - whole).toFixed(2));
+  const nearestFraction = fractionMap.find(([candidate]) => Math.abs(candidate - decimal) <= 0.04);
+
+  if (nearestFraction) {
+    const fractionLabel = nearestFraction[1];
+    return whole > 0 ? `${whole} ${fractionLabel}` : fractionLabel;
+  }
+
+  if (Number.isInteger(rounded)) return String(rounded);
+  return String(rounded);
+};
+
+const scaleIngredientForDisplay = (ingredient: string, factor: number): string => {
+  if (!ingredient || factor === 1) return ingredient;
+
+  const match = ingredient.match(/^(\d+(?:[./]\d+)?)\s*(cups?|cup|tbsp|tsp|g|kg|ml|l|oz|lb|cloves?|pieces?|piece|slices?)?\s+(.+)$/i);
+  if (!match) return ingredient;
+
+  const rawAmount = match[1];
+  const rawUnit = (match[2] || 'unit').toLowerCase();
+  const name = match[3];
+  const baseAmount = rawAmount.includes('/')
+    ? rawAmount.split('/').map(Number).reduce((a, b) => (b ? a / b : a), 1)
+    : Number(rawAmount);
+
+  if (!Number.isFinite(baseAmount) || baseAmount <= 0) return ingredient;
+
+  let scaled = baseAmount * factor;
+  let finalUnit = rawUnit;
+
+  // Kitchen-friendly conversion for tiny tablespoon values.
+  if ((rawUnit === 'tbsp' || rawUnit === 'tablespoon' || rawUnit === 'tablespoons') && scaled < 1) {
+    scaled = scaled * 3;
+    finalUnit = 'tsp';
+  }
+
+  // Kitchen-friendly conversion for tiny cup values.
+  if ((rawUnit === 'cup' || rawUnit === 'cups') && scaled < 0.5) {
+    scaled = scaled * 16;
+    finalUnit = 'tbsp';
+  }
+
+  return `${formatSmartQuantity(scaled)} ${finalUnit} ${name}`;
+};
+
+const daysUntilDate = (dateValue?: string): number => {
+  if (!dateValue) return Number.POSITIVE_INFINITY;
+  const target = new Date(dateValue);
+  if (Number.isNaN(target.getTime())) return Number.POSITIVE_INFINITY;
+  const now = new Date();
+  const diffMs = target.getTime() - now.getTime();
+  return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+};
+
+const getPantryPriorityScore = (recipe: Recipe, pantryItems: Ingredient[]): number => {
+  if (!recipe.ingredients.length || !pantryItems.length) return 0;
+
+  const score = pantryItems.reduce((total, item) => {
+    const normalizedPantryName = normalizeIngredientName(item.name);
+    const matchesRecipe = recipe.ingredients.some((ingredient) => {
+      const normalizedIngredient = normalizeIngredientName(ingredient);
+      return normalizedIngredient.includes(normalizedPantryName) || normalizedPantryName.includes(normalizedIngredient);
+    });
+
+    if (!matchesRecipe) return total;
+
+    const expiryDays = daysUntilDate(item.expiryDate);
+    if (expiryDays <= 2) return total + 5;
+    if (expiryDays <= 5) return total + 3;
+    return total + 1;
+  }, 0);
+
+  return score;
+};
+
 const parseStepDurationFromInstruction = (instruction: string): number | undefined => {
   if (!instruction) return undefined;
   const text = instruction.toLowerCase();
@@ -221,6 +345,36 @@ const parseStepDurationFromInstruction = (instruction: string): number | undefin
   return undefined;
 };
 
+const parseStepDurationRangeOptions = (instruction: string): number[] => {
+  if (!instruction) return [];
+  const text = instruction.toLowerCase();
+  const rangeMatch = text.match(/(\d+)\s*(?:-|to|–)\s*(\d+)\s*(hours?|hrs?|hr|minutes?|mins?|min|seconds?|secs?|sec)\b/);
+  if (!rangeMatch) return [];
+
+  const start = Number(rangeMatch[1]);
+  const end = Number(rangeMatch[2]);
+  const unit = rangeMatch[3];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+
+  const toSeconds = (value: number) => {
+    if (unit.startsWith('hour') || unit.startsWith('hr')) return value * 3600;
+    if (unit.startsWith('min')) return value * 60;
+    return value;
+  };
+
+  const options: number[] = [];
+  const width = end - start;
+
+  options.push(toSeconds(start));
+  if (width >= 2) {
+    const mid = start + Math.round(width / 2);
+    options.push(toSeconds(mid));
+  }
+  options.push(toSeconds(end));
+
+  return Array.from(new Set(options)).sort((a, b) => a - b);
+};
+
 const STEP_ACTION_VERBS = [
   'mix', 'stir', 'add', 'plate', 'garnish', 'season', 'fold',
   'whisk', 'pour', 'chop', 'slice', 'knead', 'toss', 'coat',
@@ -238,7 +392,20 @@ const resolveStepDuration = (instruction: string, explicitDuration?: number): { 
   const detectedDuration = parseStepDurationFromInstruction(instruction);
 
   // Preserve exact recipe-provided durations.
-  if (typeof explicitDuration === 'number' && explicitDuration > 0) {
+  if (typeof explicitDuration === 'number' && Number.isFinite(explicitDuration) && explicitDuration > 0) {
+    if (detectedDuration && detectedDuration > 0) {
+      const ratio = detectedDuration / explicitDuration;
+      const looksLikeUnitMismatch =
+        (ratio >= 59 && ratio <= 61) ||
+        (ratio >= 3590 && ratio <= 3610);
+
+      // If recipe duration appears to be minute/hour units while timer expects seconds,
+      // trust the instruction-derived duration to keep UI timer aligned with step text.
+      if (looksLikeUnitMismatch) {
+        return { duration: detectedDuration, source: 'detected', suggested: false };
+      }
+    }
+
     return { duration: explicitDuration, source: 'recipe', suggested: false };
   }
 
@@ -270,20 +437,137 @@ const formatDurationLabel = (totalSeconds: number): string => {
   return parts.join(' ') || '0s';
 };
 
+const normalizeRecipeTimeMinutes = (rawValue: number): number => {
+  if (!Number.isFinite(rawValue) || rawValue <= 0) return 0;
+
+  // AI sometimes returns prep/cook in seconds; convert obvious second-based values.
+  if (rawValue >= 300 && rawValue % 60 === 0) {
+    return Math.max(1, Math.round(rawValue / 60));
+  }
+
+  return Math.round(rawValue);
+};
+
+const getRecipeTotalMinutes = (recipe: Recipe): number => {
+  return normalizeRecipeTimeMinutes(recipe.prepTime) + normalizeRecipeTimeMinutes(recipe.cookTime);
+};
+
 const estimateRecipeCost = (ingredientCount: number): number => {
   // FIX: Restore deterministic per-recipe cost estimate so recipe detail no longer shows empty cost intelligence.
-  const perIngredient = 1.75;
-  const base = 2.5;
-  return Number((base + ingredientCount * perIngredient).toFixed(2));
+  const perIngredientUsd = 1.75;
+  const baseUsd = 2.5;
+  const usdToInr = 83;
+  return Number(((baseUsd + ingredientCount * perIngredientUsd) * usdToInr).toFixed(0));
 };
 
 const buildTimelineInsight = (recipe: Recipe): string[] => {
   // FIX: Reintroduce timeline breakdown to avoid missing cooking guidance panel.
+  const prepMinutes = normalizeRecipeTimeMinutes(recipe.prepTime);
+  const cookMinutes = normalizeRecipeTimeMinutes(recipe.cookTime);
   return [
-    `Prep: ${recipe.prepTime} min`,
-    `Cook: ${recipe.cookTime} min`,
-    `Total: ${recipe.prepTime + recipe.cookTime} min`,
+    `Prep: ${prepMinutes} min`,
+    `Cook: ${cookMinutes} min`,
+    `Total: ${prepMinutes + cookMinutes} min`,
   ];
+};
+
+const COOKING_CHECKPOINTS_KEY = 'CULINARY_LENS_COOKING_CHECKPOINTS';
+
+const getCookingCheckpointMap = (): Record<string, number> => {
+  const raw = localStorage.getItem(COOKING_CHECKPOINTS_KEY);
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const saveCookingCheckpoint = (recipeId: string, stepIndex: number) => {
+  if (!recipeId) return;
+  const map = getCookingCheckpointMap();
+  map[recipeId] = Math.max(0, stepIndex || 0);
+  localStorage.setItem(COOKING_CHECKPOINTS_KEY, JSON.stringify(map));
+};
+
+const clearCookingCheckpoint = (recipeId: string) => {
+  if (!recipeId) return;
+  const map = getCookingCheckpointMap();
+  if (!(recipeId in map)) return;
+  delete map[recipeId];
+  localStorage.setItem(COOKING_CHECKPOINTS_KEY, JSON.stringify(map));
+};
+
+const getCookingCheckpoint = (recipeId: string): number => {
+  if (!recipeId) return 0;
+  const map = getCookingCheckpointMap();
+  const value = map[recipeId];
+  return typeof value === 'number' && value >= 0 ? value : 0;
+};
+
+const RECENT_RECIPES_CACHE_KEY = 'CULINARY_LENS_RECENT_RECIPES';
+
+const getRecentRecipesCache = (): Recipe[] => {
+  const raw = localStorage.getItem(RECENT_RECIPES_CACHE_KEY);
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Recipe[]) : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveRecentRecipesCache = (recipes: Recipe[]) => {
+  if (!Array.isArray(recipes) || recipes.length === 0) return;
+
+  const previous = getRecentRecipesCache();
+  const merged = [...recipes, ...previous].filter((recipe, index, list) => {
+    const id = recipe?.id;
+    if (!id) return false;
+    return list.findIndex((item) => item?.id === id) === index;
+  });
+
+  localStorage.setItem(RECENT_RECIPES_CACHE_KEY, JSON.stringify(merged.slice(0, 5)));
+};
+
+type TasteFeedback = 'TOO_SPICY' | 'TOO_BLAND' | 'PERFECT' | null;
+const TASTE_FEEDBACK_KEY = 'CULINARY_LENS_TASTE_FEEDBACK';
+
+const getStoredTasteFeedback = (): TasteFeedback => {
+  const value = localStorage.getItem(TASTE_FEEDBACK_KEY);
+  if (value === 'TOO_SPICY' || value === 'TOO_BLAND' || value === 'PERFECT') return value;
+  return null;
+};
+
+const setStoredTasteFeedback = (value: TasteFeedback) => {
+  if (!value) {
+    localStorage.removeItem(TASTE_FEEDBACK_KEY);
+    return;
+  }
+  localStorage.setItem(TASTE_FEEDBACK_KEY, value);
+};
+
+const applyTasteFeedbackNudge = (recipes: Recipe[], feedback: TasteFeedback): Recipe[] => {
+  if (!feedback || recipes.length <= 1) return recipes;
+
+  const spicyWords = ['spicy', 'chili', 'pepper', 'hot'];
+  const mildWords = ['mild', 'creamy', 'buttery', 'light'];
+
+  const scoreRecipe = (recipe: Recipe): number => {
+    const haystack = `${recipe.title} ${recipe.description}`.toLowerCase();
+    const spicyScore = spicyWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
+    const mildScore = mildWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
+
+    if (feedback === 'TOO_SPICY') return mildScore - spicyScore;
+    if (feedback === 'TOO_BLAND') return spicyScore - mildScore;
+    return spicyScore + mildScore;
+  };
+
+  return [...recipes].sort((a, b) => scoreRecipe(b) - scoreRecipe(a));
 };
 
 // --- Main App ---
@@ -302,6 +586,8 @@ export default function App() {
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('GEMINI_API_KEY') || process.env.GEMINI_API_KEY || '');
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipeCardImages, setRecipeCardImages] = useState<Record<string, string>>({});
+  const [prioritizePantryUse, setPrioritizePantryUse] = useState(false);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -324,6 +610,7 @@ export default function App() {
   const [mealPlanType, setMealPlanType] = useState<MealPlanEntry['type']>('DINNER');
   const [gamificationState, setGamificationState] = useState<GamificationState>(() => GamificationService.getState());
   const [newlyUnlockedBadges, setNewlyUnlockedBadges] = useState<GamificationBadge[]>([]);
+  const [tasteFeedback, setTasteFeedback] = useState<TasteFeedback>(() => getStoredTasteFeedback());
 
   const handleRecipeImageError = (event: React.SyntheticEvent<HTMLImageElement, Event>) => {
     const img = event.currentTarget;
@@ -402,6 +689,44 @@ export default function App() {
       unsub();
     };
   }, []);
+
+  useEffect(() => {
+    let isActive = true;
+
+    if (!recipes.length) {
+      setRecipeCardImages({});
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const loadRecipeCardImages = async () => {
+      const entries = await Promise.all(
+        recipes.map(async (recipe) => {
+          try {
+            const generated = await generateRecipeImage(recipe.title, recipe.ingredients, {
+              cuisine: recipe.cuisine,
+              description: recipe.description,
+            }, {
+              fallbackImageUrl: recipe.imageUrl,
+            });
+            return [recipe.id, generated] as const;
+          } catch {
+            return [recipe.id, recipe.imageUrl || FALLBACK_RECIPE_IMAGE] as const;
+          }
+        })
+      );
+
+      if (!isActive) return;
+      setRecipeCardImages(Object.fromEntries(entries));
+    };
+
+    loadRecipeCardImages();
+
+    return () => {
+      isActive = false;
+    };
+  }, [recipes]);
 
   // Handlers
   const handleSignIn = async () => {
@@ -572,11 +897,19 @@ export default function App() {
     setIsProcessing(true);
     try {
       const results = await recipeEngine.synthesizeRecipes(ingredients, cuisinePreference, nutritionalGoal, isFreeTier);
-      setRecipes(results);
+      const nudged = applyTasteFeedbackNudge(results, tasteFeedback);
+      setRecipes(nudged);
+      saveRecentRecipesCache(nudged);
       setWorkflow('RECIPE_SELECTOR');
     } catch (err) {
-      setError("Synthesis failed. Using local recipes.");
-      setRecipes(OFFLINE_RECIPES.slice(0, 3));
+      const cached = getRecentRecipesCache();
+      if (cached.length > 0) {
+        setError("Synthesis failed. Using your recent offline recipes.");
+        setRecipes(cached.slice(0, 3));
+      } else {
+        setError("Synthesis failed. Using local recipes.");
+        setRecipes(OFFLINE_RECIPES.slice(0, 3));
+      }
       setWorkflow('RECIPE_SELECTOR');
     } finally {
       setIsProcessing(false);
@@ -992,6 +1325,54 @@ export default function App() {
           <div className="absolute inset-0">
             {ingredients.map((ing, i) => (
               <React.Fragment key={ing.id}>
+                {(() => {
+                  const bboxTop = ing.boundingBox ? ing.boundingBox[0] / 10 : undefined;
+                  const bboxLeft = ing.boundingBox ? ing.boundingBox[1] / 10 : undefined;
+                  const rawTop = bboxTop !== undefined ? bboxTop - 3 : (ing.y ?? (20 + (i * 10)));
+                  const rawLeft = bboxLeft !== undefined ? bboxLeft + 2 : (ing.x ?? (20 + (i * 10)));
+                  const markerTop = Math.min(96, Math.max(4, rawTop));
+                  const markerLeft = Math.min(96, Math.max(4, rawLeft));
+
+                  return (
+                    <motion.div
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 260,
+                        damping: 20,
+                        delay: i * 0.05
+                      }}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 z-20"
+                      style={{
+                        top: `${markerTop}%`,
+                        left: `${markerLeft}%`
+                      }}
+                    >
+                      <div className="relative group/marker">
+                        {/* Outer Glow */}
+                        <div className={cn(
+                          "absolute -inset-2 rounded-full blur-sm opacity-40 animate-pulse",
+                          ing.confidence > 0.9 ? "bg-green-400" : "bg-blue-400"
+                        )} />
+
+                        {/* Main Pill */}
+                        <div className="bg-white/95 backdrop-blur-xl px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-2 border border-white/50 cursor-pointer hover:scale-110 transition-transform">
+                          <div className={cn(
+                            "w-2 h-2 rounded-full",
+                            ing.confidence > 0.9 ? "bg-green-500" : "bg-blue-500"
+                          )} />
+                          <span className="text-[11px] font-bold text-zinc-900 whitespace-nowrap">{ing.name}</span>
+                          <span className="text-[9px] font-bold text-zinc-400">{Math.round(ing.confidence * 100)}%</span>
+                        </div>
+
+                        {/* Connector Line (Optional visual flair) */}
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 w-px h-4 bg-gradient-to-b from-white/50 to-transparent" />
+                      </div>
+                    </motion.div>
+                  );
+                })()}
+
                 {/* Bounding Box */}
                 {ing.boundingBox && (
                   <motion.div 
@@ -1007,42 +1388,6 @@ export default function App() {
                   />
                 )}
                 
-                <motion.div 
-                  initial={{ scale: 0, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ 
-                    type: 'spring',
-                    stiffness: 260,
-                    damping: 20,
-                    delay: i * 0.05 
-                  }}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 z-20"
-                  style={{ 
-                    top: `${ing.y ?? (20 + (i * 10))}%`, 
-                    left: `${ing.x ?? (20 + (i * 10))}%` 
-                  }}
-                >
-                  <div className="relative group/marker">
-                    {/* Outer Glow */}
-                    <div className={cn(
-                      "absolute -inset-2 rounded-full blur-sm opacity-40 animate-pulse",
-                      ing.confidence > 0.9 ? "bg-green-400" : "bg-blue-400"
-                    )} />
-                    
-                    {/* Main Pill */}
-                    <div className="bg-white/95 backdrop-blur-xl px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-2 border border-white/50 cursor-pointer hover:scale-110 transition-transform">
-                      <div className={cn(
-                        "w-2 h-2 rounded-full",
-                        ing.confidence > 0.9 ? "bg-green-500" : "bg-blue-500"
-                      )} />
-                      <span className="text-[11px] font-bold text-zinc-900 whitespace-nowrap">{ing.name}</span>
-                      <span className="text-[9px] font-bold text-zinc-400">{Math.round(ing.confidence * 100)}%</span>
-                    </div>
-
-                    {/* Connector Line (Optional visual flair) */}
-                    <div className="absolute top-full left-1/2 -translate-x-1/2 w-px h-4 bg-gradient-to-b from-white/50 to-transparent" />
-                  </div>
-                </motion.div>
               </React.Fragment>
             ))}
           </div>
@@ -1383,7 +1728,33 @@ export default function App() {
         </motion.div>
 
         <div className="space-y-6">
-          {recipes.map((recipe, i) => (
+          <div className="flex items-center justify-between bg-white border border-zinc-100 rounded-2xl p-3">
+            <div>
+              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Recipe Sorting</p>
+              <p className="text-xs text-zinc-600">Prioritize expiring pantry items</p>
+            </div>
+            <button
+              onClick={() => setPrioritizePantryUse((prev) => !prev)}
+              className={cn(
+                "text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors",
+                prioritizePantryUse
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                  : "bg-zinc-50 border-zinc-200 text-zinc-600"
+              )}
+            >
+              {prioritizePantryUse ? 'Pantry First: On' : 'Pantry First: Off'}
+            </button>
+          </div>
+
+          {[...recipes]
+            .sort((a, b) => {
+              if (!prioritizePantryUse) return 0;
+              const pantryItems = PantryService.getPantry();
+              const scoreA = getPantryPriorityScore(a, pantryItems);
+              const scoreB = getPantryPriorityScore(b, pantryItems);
+              return scoreB - scoreA;
+            })
+            .map((recipe, i) => (
             (() => {
               const ingredientNames = ingredients.map((item) => item.name.toLowerCase());
               const overlapCount = recipe.ingredients.filter((ingredient) => ingredientNames.some((name) => name.includes(ingredient.toLowerCase()) || ingredient.toLowerCase().includes(name))).length;
@@ -1398,7 +1769,7 @@ export default function App() {
             >
               <Card className="p-0 overflow-hidden group">
                 <div className="relative aspect-video overflow-hidden">
-                  <img src={recipe.imageUrl} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" referrerPolicy="no-referrer" onError={handleRecipeImageError} />
+                  <img src={recipeCardImages[recipe.id] || recipe.imageUrl || FALLBACK_RECIPE_IMAGE} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" referrerPolicy="no-referrer" onError={handleRecipeImageError} />
                   <div className="absolute top-4 left-4 flex gap-2">
                     <Badge variant={recipe.source === 'AI' ? 'info' : 'default'} className="bg-white/90 backdrop-blur-md">
                       {recipe.source === 'AI' ? 'AI Synthesized' : 'Static Match'}
@@ -1422,7 +1793,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center justify-between text-xs font-bold text-zinc-400 uppercase tracking-wider">
                     <div className="flex items-center gap-4">
-                      <span>{recipe.prepTime + recipe.cookTime} MIN</span>
+                      <span>{getRecipeTotalMinutes(recipe)} MIN</span>
                       <span>{recipe.macros.calories} KCAL</span>
                     </div>
                     <div className="flex gap-2">
@@ -1461,6 +1832,8 @@ export default function App() {
     const [substituteError, setSubstituteError] = useState<string | null>(null);
     const [recipeHeroImage, setRecipeHeroImage] = useState<string>('');
     const [recipeHeroLoading, setRecipeHeroLoading] = useState(true);
+    const [isRegeneratingImage, setIsRegeneratingImage] = useState(false);
+    const [isAddingMissingToList, setIsAddingMissingToList] = useState(false);
 
     useEffect(() => {
       setBoughtMissingIngredients([]);
@@ -1485,7 +1858,12 @@ export default function App() {
         }
 
         setRecipeHeroLoading(true);
-        const generatedImage = await generateRecipeImage(selectedRecipe.title, selectedRecipe.ingredients);
+        const generatedImage = await generateRecipeImage(selectedRecipe.title, selectedRecipe.ingredients, {
+          cuisine: selectedRecipe.cuisine,
+          description: selectedRecipe.description,
+        }, {
+          fallbackImageUrl: selectedRecipe.imageUrl,
+        });
 
         if (!isActive) return;
         setRecipeHeroImage(generatedImage);
@@ -1500,6 +1878,24 @@ export default function App() {
     }, [selectedRecipe?.id]);
 
     if (!selectedRecipe) return null;
+
+    const handleRegenerateRecipeImage = async () => {
+      setIsRegeneratingImage(true);
+      setRecipeHeroLoading(true);
+      try {
+        const refreshed = await generateRecipeImage(selectedRecipe.title, selectedRecipe.ingredients, {
+          cuisine: selectedRecipe.cuisine,
+          description: selectedRecipe.description,
+        }, {
+          fallbackImageUrl: selectedRecipe.imageUrl,
+          forceRefresh: true,
+        });
+        setRecipeHeroImage(refreshed);
+      } finally {
+        setRecipeHeroLoading(false);
+        setIsRegeneratingImage(false);
+      }
+    };
     
     const macroData = [
       { name: 'Protein', value: selectedRecipe.macros.protein * 4, color: '#10b981' },
@@ -1523,6 +1919,7 @@ export default function App() {
     const missingIngredients = selectedRecipe.ingredients.filter(
       (ing) => !hasIngredientMatch(ing, availableIngredientNames)
     );
+    const savedStepForRecipe = getCookingCheckpoint(selectedRecipe.id);
 
     const openSubstituteModal = async (ingredient: string) => {
       const pantryItems = PantryService.getPantry().map((item) => item.name);
@@ -1542,6 +1939,31 @@ export default function App() {
         setSubstituteError('Unable to load substitutions right now. Please try again.');
       } finally {
         setSubstituteLoading(false);
+      }
+    };
+
+    const handleAddMissingToShoppingList = async () => {
+      if (!selectedRecipe || missingIngredients.length === 0 || isAddingMissingToList) return;
+
+      setIsAddingMissingToList(true);
+      try {
+        const items = missingIngredients.map((name) => {
+          const estimate = getShoppingEstimate(name);
+          return {
+            name,
+            quantity: estimate.quantity,
+            unit: estimate.unit,
+            recipeId: selectedRecipe.id,
+          };
+        });
+
+        await ShoppingListService.addIngredientsToShoppingList(user?.uid || '', items);
+        setBoughtMissingIngredients((prev) => Array.from(new Set([...prev, ...missingIngredients])));
+      } catch (error) {
+        console.error('Failed to add missing ingredients:', error);
+        setError('Unable to add missing ingredients to shopping list right now.');
+      } finally {
+        setIsAddingMissingToList(false);
       }
     };
 
@@ -1570,6 +1992,15 @@ export default function App() {
           >
             <ArrowLeft className="w-6 h-6" />
           </Button>
+          <Button
+            onClick={handleRegenerateRecipeImage}
+            variant="ghost"
+            size="sm"
+            className="absolute top-6 right-6 bg-white/20 backdrop-blur-md text-white hover:bg-white/40"
+            disabled={isRegeneratingImage}
+          >
+            {isRegeneratingImage ? 'Regenerating...' : 'Regenerate Image'}
+          </Button>
           <div className="absolute bottom-6 left-6 right-6">
             <div className="flex gap-2 mb-2">
               <Badge variant="info" className="bg-white/20 backdrop-blur-md text-white border-white/30">{selectedRecipe.cuisine}</Badge>
@@ -1583,7 +2014,7 @@ export default function App() {
           <div className="flex items-center justify-between p-4 bg-zinc-50 rounded-3xl border border-zinc-100">
             <div className="text-center flex-1">
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Total Time</p>
-              <p className="text-sm font-bold text-zinc-900">{selectedRecipe.prepTime + selectedRecipe.cookTime}m</p>
+              <p className="text-sm font-bold text-zinc-900">{getRecipeTotalMinutes(selectedRecipe)}m</p>
             </div>
             <div className="w-px h-8 bg-zinc-200" />
             <div className="text-center flex-1">
@@ -1647,7 +2078,7 @@ export default function App() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Card className="p-4 bg-blue-50 border-blue-100 shadow-none">
               <p className="text-[10px] font-bold uppercase tracking-wider text-blue-700">Smart Cost Intelligence</p>
-              <p className="text-2xl font-bold text-blue-900 mt-1">${estimateRecipeCost(selectedRecipe.ingredients.length)}</p>
+              <p className="text-2xl font-bold text-blue-900 mt-1">₹{estimateRecipeCost(selectedRecipe.ingredients.length).toLocaleString('en-IN')}</p>
               <p className="text-xs text-blue-700 mt-1">Estimated total based on ingredient count and pantry-adjusted baseline.</p>
             </Card>
             <Card className="p-4 bg-emerald-50 border-emerald-100 shadow-none">
@@ -1665,7 +2096,7 @@ export default function App() {
             <div className="space-y-2">
               {selectedRecipe.ingredients.map((ing, i) => (
                 <div key={i} className="flex items-center justify-between p-3 bg-zinc-50 rounded-2xl border border-zinc-100">
-                  <span className="text-sm font-medium text-zinc-700">{ing}</span>
+                  <span className="text-sm font-medium text-zinc-700">{scaleIngredientForDisplay(ing, scaleFactor)}</span>
                   <div className="flex items-center gap-2">
                     {hasIngredientMatch(ing, availableIngredientNames) ? (
                       <Badge variant="success" className="text-[8px] px-1.5 py-0">In Stock</Badge>
@@ -1687,10 +2118,21 @@ export default function App() {
 
             {missingIngredients.length > 0 && (
               <div className="pt-2 space-y-2">
-                <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Missing Ingredients (Tap To Buy)</h4>
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Missing Ingredients (Tap To Buy)</h4>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={handleAddMissingToShoppingList}
+                    disabled={isAddingMissingToList}
+                  >
+                    {isAddingMissingToList ? 'Adding...' : 'Add All Missing'}
+                  </Button>
+                </div>
                 {missingIngredients.map((ingredient) => (
                   (() => {
                     const isBought = boughtMissingIngredients.includes(ingredient);
+                    const amountHint = getMissingAmountHint(ingredient);
                     return (
                   <div
                     key={`missing-${ingredient}`}
@@ -1701,7 +2143,10 @@ export default function App() {
                         : "bg-amber-50 border-amber-100"
                     )}
                   >
-                    <span className={cn("text-sm font-medium", isBought ? "text-emerald-900" : "text-amber-900")}>{ingredient}</span>
+                    <div className="text-left">
+                      <p className={cn("text-sm font-medium", isBought ? "text-emerald-900" : "text-amber-900")}>{ingredient}</p>
+                      <p className={cn("text-[11px]", isBought ? "text-emerald-700" : "text-amber-700")}>Estimated amount: {amountHint}</p>
+                    </div>
                     <div className="flex items-center gap-2">
                       <Button
                         size="sm"
@@ -1736,12 +2181,14 @@ export default function App() {
 
           <Button 
             onClick={() => {
-              setCurrentStepIndex(0);
+              const savedStep = getCookingCheckpoint(selectedRecipe.id);
+              const safeStep = Math.min(savedStep, Math.max(selectedRecipe.steps.length - 1, 0));
+              setCurrentStepIndex(safeStep);
               setWorkflow('COOKING_MODE');
             }} 
             className="w-full py-6 text-lg shadow-xl shadow-black/10"
           >
-            Start Cooking Mode <Play className="ml-2 w-4 h-4 fill-current" />
+            {savedStepForRecipe > 0 ? 'Resume Cooking Mode' : 'Start Cooking Mode'} <Play className="ml-2 w-4 h-4 fill-current" />
           </Button>
         </div>
 
@@ -1835,10 +2282,15 @@ export default function App() {
     const currentStep = selectedRecipe.steps[currentStepIndex];
     const progress = ((currentStepIndex + 1) / selectedRecipe.steps.length) * 100;
     const [autoAdvanceTimer, setAutoAdvanceTimer] = useState(true);
+    const [keepScreenAwake, setKeepScreenAwake] = useState(() => localStorage.getItem('COOK_MODE_KEEP_AWAKE') === 'true');
+    const wakeLockRef = useRef<any>(null);
     const resolvedStepDuration = resolveStepDuration(currentStep.instruction, currentStep.duration);
     const stepDuration = resolvedStepDuration.duration;
+    const rangeOptions = parseStepDurationRangeOptions(currentStep.instruction);
+    const [selectedTimerDuration, setSelectedTimerDuration] = useState(stepDuration);
     const isSuggestedTimer = resolvedStepDuration.suggested;
     const canAutoAdvanceFromTimer = !isSuggestedTimer;
+    const supportsWakeLock = typeof navigator !== 'undefined' && 'wakeLock' in navigator;
 
     useEffect(() => {
       speak(currentStep.instruction);
@@ -1848,6 +2300,62 @@ export default function App() {
       // FIX: Steps without explicit timing should not auto-advance by default.
       setAutoAdvanceTimer(canAutoAdvanceFromTimer);
     }, [canAutoAdvanceFromTimer, currentStepIndex]);
+
+    useEffect(() => {
+      setSelectedTimerDuration(stepDuration);
+    }, [stepDuration, currentStepIndex]);
+
+    useEffect(() => {
+      saveCookingCheckpoint(selectedRecipe.id, currentStepIndex);
+    }, [selectedRecipe.id, currentStepIndex]);
+
+    useEffect(() => {
+      localStorage.setItem('COOK_MODE_KEEP_AWAKE', keepScreenAwake ? 'true' : 'false');
+    }, [keepScreenAwake]);
+
+    useEffect(() => {
+      let isCancelled = false;
+
+      const requestWakeLock = async () => {
+        if (!keepScreenAwake || !supportsWakeLock) return;
+
+        try {
+          const wakeLock = await (navigator as any).wakeLock.request('screen');
+          if (isCancelled) {
+            await wakeLock.release();
+            return;
+          }
+
+          wakeLockRef.current = wakeLock;
+          wakeLock.addEventListener?.('release', () => {
+            wakeLockRef.current = null;
+          });
+        } catch {
+          // Keep cooking mode functional even if wake lock is unavailable.
+        }
+      };
+
+      const releaseWakeLock = async () => {
+        try {
+          await wakeLockRef.current?.release?.();
+        } catch {
+          // Ignore release errors.
+        } finally {
+          wakeLockRef.current = null;
+        }
+      };
+
+      if (keepScreenAwake) {
+        requestWakeLock();
+      } else {
+        releaseWakeLock();
+      }
+
+      return () => {
+        isCancelled = true;
+        releaseWakeLock();
+      };
+    }, [keepScreenAwake, supportsWakeLock]);
 
     const handleTimerComplete = () => {
       speak("Time is up.");
@@ -1865,7 +2373,9 @@ export default function App() {
             <X className="w-6 h-6" />
           </Button>
           <div className="text-center">
-            <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Step {currentStepIndex + 1} of {selectedRecipe.steps.length}</p>
+              const savedStep = getCookingCheckpoint(selectedRecipe.id);
+              const safeStep = Math.min(savedStep, Math.max(selectedRecipe.steps.length - 1, 0));
+              setCurrentStepIndex(safeStep);
             <h3 className="text-sm font-bold text-zinc-900 truncate max-w-[200px]">{selectedRecipe.title}</h3>
           </div>
           <Button onClick={() => setIsMuted(!isMuted)} variant="ghost" size="icon">
@@ -1899,7 +2409,7 @@ export default function App() {
               
               <div className="max-w-md mx-auto space-y-3">
                 <div className="flex flex-wrap items-center justify-center gap-2">
-                  <Badge variant="info">Smart Timer: {formatDurationLabel(stepDuration)}</Badge>
+                  <Badge variant="info">Smart Timer: {formatDurationLabel(selectedTimerDuration)}</Badge>
                   {resolvedStepDuration.source === 'recipe' ? (
                     <Badge variant="default">Recipe Defined</Badge>
                   ) : resolvedStepDuration.source === 'detected' ? (
@@ -1909,8 +2419,27 @@ export default function App() {
                   )}
                 </div>
 
+                {rangeOptions.length > 1 && (
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {rangeOptions.map((seconds) => (
+                      <button
+                        key={`timer-option-${seconds}`}
+                        onClick={() => setSelectedTimerDuration(seconds)}
+                        className={cn(
+                          'text-[11px] font-semibold px-3 py-1.5 rounded-full border transition-colors',
+                          selectedTimerDuration === seconds
+                            ? 'bg-blue-50 border-blue-200 text-blue-700'
+                            : 'bg-zinc-50 border-zinc-200 text-zinc-600'
+                        )}
+                      >
+                        {formatDurationLabel(seconds)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <CookingTimer
-                  duration={stepDuration}
+                  duration={selectedTimerDuration}
                   autoStart={!isSuggestedTimer}
                   label={resolvedStepDuration.suggested ? 'Step Timer' : 'Timer'}
                   suggested={resolvedStepDuration.suggested}
@@ -1928,6 +2457,26 @@ export default function App() {
                 >
                   Auto move to next step: {autoAdvanceTimer ? 'On' : 'Off'}
                 </button>
+
+                <button
+                  onClick={() => setKeepScreenAwake((prev) => !prev)}
+                  disabled={!supportsWakeLock}
+                  className={cn(
+                    "mx-auto text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                    keepScreenAwake
+                      ? "bg-blue-50 border-blue-200 text-blue-700"
+                      : "bg-zinc-50 border-zinc-200 text-zinc-600"
+                  )}
+                >
+                  Keep screen awake: {keepScreenAwake ? 'On' : 'Off'}
+                </button>
+
+                {!supportsWakeLock && (
+                  <p className="text-[11px] text-zinc-500">
+                    This browser does not support screen wake lock.
+                  </p>
+                )}
+
                 {isSuggestedTimer && (
                   <p className="text-xs text-zinc-500">
                     No time found in instruction. Start this suggested timer manually when ready.
@@ -1961,6 +2510,7 @@ export default function App() {
               onClick={() => {
                 const consumedCount = PantryService.consumeIngredientsByNames(selectedRecipe.ingredients);
                 PantryService.recordLastCookActivity(selectedRecipe.title, consumedCount);
+                clearCookingCheckpoint(selectedRecipe.id);
                 const cookProgress = GamificationService.recordCook();
                 setGamificationState(cookProgress.state);
                 if (cookProgress.newlyUnlocked.length) {
@@ -2035,6 +2585,35 @@ export default function App() {
             </div>
           </Card>
         )}
+
+        <div className="space-y-3">
+          <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Taste Feedback</p>
+          <div className="flex flex-wrap justify-center gap-2">
+            {[
+              { id: 'TOO_SPICY', label: 'Too Spicy' },
+              { id: 'TOO_BLAND', label: 'Too Bland' },
+              { id: 'PERFECT', label: 'Perfect' },
+            ].map((option) => (
+              <button
+                key={option.id}
+                onClick={() => {
+                  const selected = option.id as TasteFeedback;
+                  setTasteFeedback(selected);
+                  setStoredTasteFeedback(selected);
+                }}
+                className={cn(
+                  'text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors',
+                  tasteFeedback === option.id
+                    ? 'bg-black text-white border-black'
+                    : 'bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300'
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-zinc-500">Saved locally and used to nudge future recipe ranking.</p>
+        </div>
 
         <div className="grid grid-cols-1 gap-4">
           <Button onClick={() => {

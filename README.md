@@ -7,6 +7,7 @@ AI-powered cooking assistant for ingredient recognition, offline-first recipe di
 ## Technical Documentation
 
 - Full engineering specification: [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md)
+- Complete deep-dive project guide: [PROJECT_DETAILED_GUIDE.md](PROJECT_DETAILED_GUIDE.md)
 
 ## Latest Updates (April 2026)
 

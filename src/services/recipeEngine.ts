@@ -122,10 +122,16 @@ export class RecipeEngine {
     }
 
     // 2. AI Generation
+    const allergies = AllergyService.getAllergies().filter(Boolean);
+    const allergyConstraint = allergies.length > 0
+      ? `Avoid these allergens completely: ${allergies.join(', ')}. Never include them in ingredients.`
+      : '';
+
     const prompt = `Generate 2 unique recipes using these ingredients: ${ingredientNames.join(', ')}. 
     Cuisine preference: ${cuisine}. 
     Nutritional goal: ${goal}. 
-    Return a JSON array of recipe objects with title, description, cuisine, ingredients, steps (id, instruction, duration, tip), prepTime, cookTime, servings, difficulty, macros (calories, protein, carbs, fat), and imageUrl (a descriptive string for image search, e.g., 'vibrant pasta carbonara with fresh herbs').`;
+    ${allergyConstraint}
+    Return a JSON array of recipe objects with title, description, cuisine, ingredients, steps (id, instruction, duration in seconds, tip), prepTime, cookTime, servings, difficulty, macros (calories, protein, carbs, fat), and imageUrl (a descriptive string for image search, e.g., 'vibrant pasta carbonara with fresh herbs').`;
 
     try {
       const response = await this.ai.models.generateContent({
@@ -149,7 +155,7 @@ export class RecipeEngine {
                     properties: {
                       id: { type: Type.STRING },
                       instruction: { type: Type.STRING },
-                      duration: { type: Type.NUMBER },
+                      duration: { type: Type.NUMBER, description: "Step duration in seconds" },
                       tip: { type: Type.STRING }
                     },
                     required: ["id", "instruction"]
@@ -177,7 +183,7 @@ export class RecipeEngine {
       });
 
       const aiRawRecipes = JSON.parse(response.text || "[]");
-      const aiRecipes = await Promise.all(
+      const aiRecipesRaw = await Promise.all(
         aiRawRecipes.map(async (r: any, index: number) => ({
           ...r,
           id: `ai-${Date.now()}-${index}`,
@@ -186,6 +192,7 @@ export class RecipeEngine {
           imageUrl: await this.generateRecipeImage(r, index),
         }))
       );
+      const aiRecipes = AllergyService.filterRecipes(aiRecipesRaw);
 
       // 3. Composition
       let finalRecipes: Recipe[] = [];
@@ -197,7 +204,7 @@ export class RecipeEngine {
         finalRecipes = aiRecipes.slice(0, 3);
       }
 
-      return finalRecipes.filter(Boolean);
+      return AllergyService.filterRecipes(finalRecipes.filter(Boolean));
     } catch (error) {
       console.error('Recipe synthesis error:', error);
       // Fallback to static matches if AI fails

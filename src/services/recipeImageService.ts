@@ -2,6 +2,16 @@ import { GoogleGenAI } from '@google/genai';
 
 const recipeImageCache = new Map<string, string>();
 
+interface RecipeImageContext {
+  cuisine?: string;
+  description?: string;
+}
+
+interface RecipeImageOptions {
+  fallbackImageUrl?: string;
+  forceRefresh?: boolean;
+}
+
 function escapeXml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -81,13 +91,52 @@ function extractBase64Image(response: any): string | null {
   return null;
 }
 
-export async function generateRecipeImage(recipeName: string, ingredients: string[]): Promise<string> {
-  const cacheKey = (recipeName || '').trim().toLowerCase();
-  if (cacheKey && recipeImageCache.has(cacheKey)) {
+function extractInlineImage(response: any): { data: string; mimeType: string } | null {
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return null;
+
+  for (const part of parts) {
+    const data = part?.inlineData?.data;
+    const mimeType = part?.inlineData?.mimeType;
+    if (typeof data === 'string' && data.length > 0 && typeof mimeType === 'string' && mimeType.includes('image')) {
+      return { data, mimeType };
+    }
+  }
+
+  return null;
+}
+
+function buildRecipeImagePrompt(recipeName: string, ingredients: string[], context?: RecipeImageContext): string {
+  const name = (recipeName || 'Recipe').trim();
+  const ingredientList = ingredients.slice(0, 10).join(', ');
+  const cuisine = (context?.cuisine || '').trim();
+  const description = (context?.description || '').trim();
+
+  return [
+    `Create a realistic, appetizing food photo of the dish "${name}".`,
+    cuisine ? `Cuisine style: ${cuisine}.` : '',
+    ingredientList ? `Visually include cues of these ingredients: ${ingredientList}.` : '',
+    description ? `Dish summary: ${description}.` : '',
+    'Composition: plated dish only, close-up at 45-degree angle, natural lighting, shallow depth of field.',
+    'Quality: high-detail texture, true-to-life colors, clean presentation, no collage.',
+    'Constraints: no text, no labels, no watermark, no logo, no people, no hands, no utensils covering the food.',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+export async function generateRecipeImage(
+  recipeName: string,
+  ingredients: string[],
+  context?: RecipeImageContext,
+  options?: RecipeImageOptions
+): Promise<string> {
+  const cacheKey = `${(recipeName || '').trim().toLowerCase()}|${ingredients.join(',').toLowerCase()}|${(context?.cuisine || '').toLowerCase()}`;
+  if (!options?.forceRefresh && cacheKey && recipeImageCache.has(cacheKey)) {
     return recipeImageCache.get(cacheKey)!;
   }
 
-  const fallback = buildPlaceholder(recipeName);
+  const fallback = (options?.fallbackImageUrl || '').trim() || buildPlaceholder(recipeName);
   const apiKey = localStorage.getItem('GEMINI_API_KEY') || process.env.GEMINI_API_KEY || '';
 
   if (!apiKey) {
@@ -97,18 +146,47 @@ export async function generateRecipeImage(recipeName: string, ingredients: strin
 
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const prompt = `Generate a beautiful, appetizing, professional food photography image of ${recipeName} made with ${ingredients.join(', ')}. Vibrant colors, well-plated, restaurant quality.`;
+    const prompt = buildRecipeImagePrompt(recipeName, ingredients, context);
+    let result = fallback;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash-exp',
-      contents: [{ parts: [{ text: prompt }] }],
-      config: {
-        responseModalities: ['IMAGE', 'TEXT'],
-      } as any,
-    });
+    const modelsClient = (ai as any)?.models;
 
-    const bytes = extractBase64Image(response);
-    const result = bytes ? `data:image/jpeg;base64,${bytes}` : fallback;
+    // Prefer Imagen when available for stronger photorealistic food results.
+    if (modelsClient?.generateImages) {
+      try {
+        const imageResponse = await modelsClient.generateImages({
+          model: 'imagen-3.0-generate-002',
+          prompt,
+          config: {
+            numberOfImages: 1,
+            outputMimeType: 'image/jpeg',
+            aspectRatio: '4:3',
+          },
+        });
+
+        const bytes = extractBase64Image(imageResponse);
+        if (bytes) {
+          result = `data:image/jpeg;base64,${bytes}`;
+        }
+      } catch {
+        // Fall through to Gemini image modality path.
+      }
+    }
+
+    if (result === fallback) {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.0-flash-exp',
+        contents: [{ parts: [{ text: prompt }] }],
+        config: {
+          responseModalities: ['IMAGE', 'TEXT'],
+        } as any,
+      });
+
+      const inline = extractInlineImage(response);
+      if (inline) {
+        result = `data:${inline.mimeType};base64,${inline.data}`;
+      }
+    }
 
     if (cacheKey) recipeImageCache.set(cacheKey, result);
     return result;
