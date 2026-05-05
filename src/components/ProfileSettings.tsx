@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Shield, Bell, LogOut, ChevronRight, X, Heart, Award, Flame, ScanLine, Package, Database } from 'lucide-react';
+import { User, Shield, Bell, ChevronRight, X, Heart, Award, Flame, ScanLine, Package, Database } from 'lucide-react';
 import { AllergyService } from '../services/allergyService';
 import { DietPreference, TasteModelService } from '../services/tasteModelService';
 import { GamificationService } from '../services/gamificationService';
@@ -11,7 +11,6 @@ import { UserProfile } from '../types';
 
 interface ProfileSettingsProps {
   user: UserProfile | null;
-  onLogout: () => void;
 }
 
 type TasteFeedback = 'TOO_SPICY' | 'TOO_BLAND' | 'PERFECT' | null;
@@ -39,7 +38,7 @@ const ALLERGY_SUGGESTIONS = [
   'Onion',
 ];
 
-export const ProfileSettings: React.FC<ProfileSettingsProps> = ({ user, onLogout }) => {
+export const ProfileSettings: React.FC<ProfileSettingsProps> = ({ user }) => {
   const [allergies, setAllergies] = useState<string[]>([]);
   const [newAllergy, setNewAllergy] = useState('');
   const [skillLevel, setSkillLevel] = useState<'BEGINNER' | 'INTERMEDIATE' | 'ADVANCED'>(() => {
@@ -456,19 +455,6 @@ export const ProfileSettings: React.FC<ProfileSettingsProps> = ({ user, onLogout
         </div>
       </section>
 
-      {/* Account Actions */}
-      <div className="pt-6 border-t border-zinc-200 space-y-4">
-        <button 
-          onClick={onLogout}
-          className="w-full flex items-center justify-between p-4 bg-red-50 border border-red-100 rounded-2xl hover:bg-red-100 transition-all group"
-        >
-          <div className="flex items-center gap-3 text-red-600">
-            <LogOut className="w-5 h-5" />
-            <span>Sign Out</span>
-          </div>
-          <ChevronRight className="w-5 h-5 text-red-400/70 group-hover:text-red-600" />
-        </button>
-      </div>
     </div>
   );
 };

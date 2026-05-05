@@ -40,8 +40,6 @@ import {
   Package,
   Heart,
   User as UserIcon,
-  LogOut,
-  LogIn
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -67,7 +65,6 @@ import {
 } from './types';
 import { VisionEngine } from './services/visionEngine';
 import { RecipeEngine } from './services/recipeEngine';
-import { StorageService } from './services/storageService';
 import { MealPlanService, MealPlanEntry } from './services/mealPlanService';
 import { STATIC_RECIPES } from './services/staticRecipes';
 import { LARGE_RECIPE_DATABASE } from './services/recipeDatabase';
@@ -77,7 +74,6 @@ import { MealPlanner } from './components/MealPlanner';
 import { ProfileSettings } from './components/ProfileSettings';
 import { ShoppingList } from './components/ShoppingList';
 import { CookingTimer } from './components/CookingTimer';
-import { User } from 'firebase/auth';
 import { ShoppingListService } from './services/shoppingListService';
 import { ScanResultService } from './services/scanResultService';
 import { LocalSavedRecipeService } from './services/localSavedRecipeService';
@@ -582,7 +578,7 @@ export default function App() {
   // State
   const [workflow, setWorkflow] = useState<WorkflowState>('LANDING');
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowState[]>([]);
-  const [user, setUser] = useState<User | null>(null);
+  const user: UserProfile | null = null;
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('GEMINI_API_KEY') || process.env.GEMINI_API_KEY || '');
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
@@ -594,7 +590,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [nutritionalGoal, setNutritionalGoal] = useState<NutritionalGoal>('BALANCED');
   const [cuisinePreference, setCuisinePreference] = useState('ALL');
-  const [savedRecipes, setSavedRecipes] = useState<Recipe[]>([]);
   const [localSavedRecipes, setLocalSavedRecipes] = useState<Recipe[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
@@ -665,32 +660,6 @@ export default function App() {
   }, [workflow]);
 
   useEffect(() => {
-    let unsubSavedRecipes: (() => void) | null = null;
-
-    const unsub = StorageService.onAuthChange((u) => {
-      setUser(u);
-
-      if (unsubSavedRecipes) {
-        unsubSavedRecipes();
-        unsubSavedRecipes = null;
-      }
-
-      if (u) {
-        unsubSavedRecipes = StorageService.onSavedRecipesChange(u.uid, setSavedRecipes);
-      } else {
-        setSavedRecipes([]);
-      }
-    });
-
-    return () => {
-      if (unsubSavedRecipes) {
-        unsubSavedRecipes();
-      }
-      unsub();
-    };
-  }, []);
-
-  useEffect(() => {
     let isActive = true;
 
     if (!recipes.length) {
@@ -729,23 +698,6 @@ export default function App() {
   }, [recipes]);
 
   // Handlers
-  const handleSignIn = async () => {
-    try {
-      await StorageService.signInWithGoogle();
-    } catch (err: any) {
-      if (err.code === 'auth/popup-blocked') {
-        setError("Sign-in popup was blocked. Please allow popups for this site and try again.");
-      } else if (err.code !== 'auth/user-cancelled') {
-        setError("Sign-in failed. Please try again or check your internet connection.");
-      }
-    }
-  };
-
-  const handleLogout = async () => {
-    await StorageService.logout();
-    setWorkflow('LANDING');
-  };
-
   const handleGoBack = () => {
     setWorkflowHistory((history) => {
       if (history.length === 0) return history;
@@ -811,7 +763,7 @@ export default function App() {
       recipeImageUrl: recipe.imageUrl
     };
     try {
-      await MealPlanService.addEntry(user?.uid || '', entry);
+      await MealPlanService.addEntry('', entry);
       alert(`Added ${recipe.title} to your ${mealType} on ${date}`);
     } catch (err) {
       console.error('Failed to add to meal plan:', err);
@@ -948,12 +900,8 @@ export default function App() {
 
   const saveRecipe = async (recipe: Recipe) => {
     try {
-      if (user) {
-        await StorageService.saveRecipe(user.uid, recipe);
-      } else {
-        const next = LocalSavedRecipeService.saveRecipe(recipe);
-        setLocalSavedRecipes(next);
-      }
+      const next = LocalSavedRecipeService.saveRecipe(recipe);
+      setLocalSavedRecipes(next);
     } catch (err) {
       console.error('Failed to save recipe:', err);
       setError("Couldn't save recipe. Please try again.");
@@ -962,12 +910,8 @@ export default function App() {
 
   const removeSavedRecipe = async (recipeId: string) => {
     try {
-      if (user) {
-        await StorageService.deleteRecipe(user.uid, recipeId);
-      } else {
-        const next = LocalSavedRecipeService.deleteRecipe(recipeId);
-        setLocalSavedRecipes(next);
-      }
+      const next = LocalSavedRecipeService.deleteRecipe(recipeId);
+      setLocalSavedRecipes(next);
     } catch (err) {
       console.error('Failed to delete saved recipe:', err);
       setError("Couldn't remove recipe. Please try again.");
@@ -983,7 +927,7 @@ export default function App() {
 
   const [showAddedAlert, setShowAddedAlert] = useState(false);
 
-  const visibleSavedRecipes = user ? savedRecipes : localSavedRecipes;
+  const visibleSavedRecipes = localSavedRecipes;
 
   const handleAddIngredientsToShoppingList = () => {
     if (selectedRecipe) {
@@ -993,7 +937,7 @@ export default function App() {
             unit: 'unit', // Default unit
             recipeId: selectedRecipe.id
         }));
-      ShoppingListService.addIngredientsToShoppingList(user?.uid || '', items)
+      ShoppingListService.addIngredientsToShoppingList('', items)
             .then(() => {
                 setShowAddedAlert(true);
                 setTimeout(() => setShowAddedAlert(false), 3000);
@@ -1082,20 +1026,14 @@ export default function App() {
         </Card>
 
         <div className="pt-8 border-t border-zinc-200 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {user ? (
-              <>
-                <img src={user.photoURL || ''} className="w-8 h-8 rounded-full border border-zinc-200" referrerPolicy="no-referrer" />
-                <div className="text-left">
-                  <p className="text-xs font-bold text-zinc-900">{user.displayName}</p>
-                  <button onClick={handleLogout} className="text-[10px] text-zinc-500 hover:text-black uppercase font-bold tracking-wider">Sign Out</button>
-                </div>
-              </>
-            ) : (
-              <Button onClick={handleSignIn} variant="ghost" size="sm">
-                <LogIn className="mr-2 w-4 h-4" /> Sign In
-              </Button>
-            )}
+          <div className="flex items-center gap-3 text-left">
+            <div className="w-8 h-8 rounded-full border border-zinc-200 bg-zinc-100 flex items-center justify-center text-[10px] font-bold text-zinc-500">
+              G
+            </div>
+            <div>
+              <p className="text-xs font-bold text-zinc-900">Guest Mode</p>
+              <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Local storage only</p>
+            </div>
           </div>
           <Button onClick={() => setWorkflow('API_CONFIG')} variant="ghost" size="icon">
             <Settings className="w-5 h-5 text-zinc-400" />
@@ -1957,7 +1895,7 @@ export default function App() {
           };
         });
 
-        await ShoppingListService.addIngredientsToShoppingList(user?.uid || '', items);
+        await ShoppingListService.addIngredientsToShoppingList('', items);
         setBoughtMissingIngredients((prev) => Array.from(new Set([...prev, ...missingIngredients])));
       } catch (error) {
         console.error('Failed to add missing ingredients:', error);
@@ -2925,9 +2863,9 @@ export default function App() {
         {workflow === 'OFFLINE_MANUAL' && <OfflineManualPage key="offline" />}
         {workflow === 'SCAN_HISTORY' && <ScanHistoryPage key="scan-history" />}
         {workflow === 'PANTRY_TRACKER' && <PantryTracker key="pantry" />}
-        {workflow === 'MEAL_PLANNER' && <MealPlanner key="planner" userId={user?.uid || ''} />}
-        {workflow === 'PROFILE_SETTINGS' && <ProfileSettings key="profile" user={user as any} onLogout={handleLogout} />}
-        {workflow === 'SHOPPING_LIST' && <ShoppingList key="shopping-list" user={user} />}
+        {workflow === 'MEAL_PLANNER' && <MealPlanner key="planner" userId="" />}
+        {workflow === 'PROFILE_SETTINGS' && <ProfileSettings key="profile" user={null} />}
+        {workflow === 'SHOPPING_LIST' && <ShoppingList key="shopping-list" />}
       </AnimatePresence>
 
       <AnimatePresence>

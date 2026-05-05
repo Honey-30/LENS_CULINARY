@@ -2,15 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { ShoppingListService } from '../services/shoppingListService';
 import { InstamartService } from '../services/instamartService';
 import { ShoppingListItem } from '../types';
-import { User } from 'firebase/auth';
 import { Check, PlusCircle, Trash2, ShoppingBag, Sparkles, ClipboardList, CircleCheckBig } from 'lucide-react';
 import { getIngredientSuggestions } from '../services/ingredientSuggestionService';
 
-interface ShoppingListProps {
-    user: User | null;
-}
-
-export const ShoppingList: React.FC<ShoppingListProps> = ({ user }) => {
+export const ShoppingList: React.FC = () => {
     const [items, setItems] = useState<ShoppingListItem[]>([]);
     const [newItemName, setNewItemName] = useState('');
     const [newItemQuantity, setNewItemQuantity] = useState<number>(1);
@@ -19,7 +14,7 @@ export const ShoppingList: React.FC<ShoppingListProps> = ({ user }) => {
     const [suggestions, setSuggestions] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
 
-    const userId = user?.uid || '';
+    const userId = '';
 
     const fetchItems = () => {
         ShoppingListService.getShoppingList(userId)
