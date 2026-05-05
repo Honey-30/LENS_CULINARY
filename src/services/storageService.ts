@@ -3,27 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  getDocs, 
-  query, 
-  where, 
-  deleteDoc,
-  onSnapshot,
-  getDocFromServer
-} from 'firebase/firestore';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  signOut, 
-  onAuthStateChanged,
-  User
-} from 'firebase/auth';
-import { db, auth } from '../firebase';
-import { Recipe, UserProfile } from '../types';
+import { Recipe } from '../types';
+
+const LOCAL_SAVED_RECIPES_KEY = 'CULINARY_LENS_LOCAL_SAVED_RECIPES';
 
 export enum OperationType {
   CREATE = 'create',
@@ -53,92 +35,49 @@ export interface FirestoreErrorInfo {
   }
 }
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
 export class StorageService {
-  static async signInWithGoogle(): Promise<User | null> {
-    const provider = new GoogleAuthProvider();
-    try {
-      const result = await signInWithPopup(auth, provider);
-      return result.user;
-    } catch (error: any) {
-      if (error.code === 'auth/user-cancelled') {
-        console.log('Sign-in cancelled by user.');
-        return null;
-      } else if (error.code === 'auth/popup-blocked') {
-        console.error('Sign-in error: Popup blocked. Please allow popups for this site.');
-        throw error;
-      } else {
-        console.error('Sign-in error:', error);
-        throw error;
-      }
-    }
+  static async signInWithGoogle(): Promise<null> {
+    return null;
   }
 
   static async logout(): Promise<void> {
-    await signOut(auth);
+    return;
   }
 
-  static onAuthChange(callback: (user: User | null) => void) {
-    return onAuthStateChanged(auth, callback);
+  static onAuthChange(callback: (user: null) => void) {
+    callback(null);
+    return () => undefined;
   }
 
   static async saveRecipe(userId: string, recipe: Recipe): Promise<void> {
-    const path = `users/${userId}/savedRecipes`;
-    try {
-      await setDoc(doc(db, path, recipe.id), recipe);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
-    }
+    const current = StorageService.getSavedRecipes();
+    const next = [...current.filter((item) => item.id !== recipe.id), recipe];
+    localStorage.setItem(LOCAL_SAVED_RECIPES_KEY, JSON.stringify(next));
   }
 
   static async deleteRecipe(userId: string, recipeId: string): Promise<void> {
-    const path = `users/${userId}/savedRecipes`;
-    try {
-      await deleteDoc(doc(db, path, recipeId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
-    }
+    const next = StorageService.getSavedRecipes().filter((recipe) => recipe.id !== recipeId);
+    localStorage.setItem(LOCAL_SAVED_RECIPES_KEY, JSON.stringify(next));
   }
 
   static onSavedRecipesChange(userId: string, callback: (recipes: Recipe[]) => void) {
-    const path = `users/${userId}/savedRecipes`;
-    return onSnapshot(collection(db, path), (snapshot) => {
-      const recipes = snapshot.docs.map(doc => doc.data() as Recipe);
-      callback(recipes);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, path);
-    });
+    callback(StorageService.getSavedRecipes());
+    return () => undefined;
   }
 
   static async testConnection() {
+    return;
+  }
+
+  private static getSavedRecipes(): Recipe[] {
+    const raw = localStorage.getItem(LOCAL_SAVED_RECIPES_KEY);
+    if (!raw) return [];
+
     try {
-      await getDocFromServer(doc(db, 'test', 'connection'));
-    } catch (error) {
-      if(error instanceof Error && error.message.includes('the client is offline')) {
-        console.error("Please check your Firebase configuration. ");
-      }
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as Recipe[]) : [];
+    } catch {
+      return [];
     }
   }
 }
