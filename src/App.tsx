@@ -77,6 +77,7 @@ import { CookingTimer } from './components/CookingTimer';
 import { ShoppingListService } from './services/shoppingListService';
 import { ScanResultService } from './services/scanResultService';
 import { LocalSavedRecipeService } from './services/localSavedRecipeService';
+import { estimateRecipeCost } from './services/recipeCostService';
 import { INGREDIENT_DICTIONARY } from './services/ingredientSuggestionService';
 import { IngredientPresetService, IngredientPreset } from './services/ingredientPresetService';
 import { InstantRecipeSuggestionService } from './services/instantRecipeSuggestionService';
@@ -448,14 +449,6 @@ const getRecipeTotalMinutes = (recipe: Recipe): number => {
   return normalizeRecipeTimeMinutes(recipe.prepTime) + normalizeRecipeTimeMinutes(recipe.cookTime);
 };
 
-const estimateRecipeCost = (ingredientCount: number): number => {
-  // FIX: Restore deterministic per-recipe cost estimate so recipe detail no longer shows empty cost intelligence.
-  const perIngredientUsd = 1.75;
-  const baseUsd = 2.5;
-  const usdToInr = 83;
-  return Number(((baseUsd + ingredientCount * perIngredientUsd) * usdToInr).toFixed(0));
-};
-
 const buildTimelineInsight = (recipe: Recipe): string[] => {
   // FIX: Reintroduce timeline breakdown to avoid missing cooking guidance panel.
   const prepMinutes = normalizeRecipeTimeMinutes(recipe.prepTime);
@@ -579,7 +572,7 @@ export default function App() {
   const [workflow, setWorkflow] = useState<WorkflowState>('LANDING');
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowState[]>([]);
   const user: UserProfile | null = null;
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('GEMINI_API_KEY') || process.env.GEMINI_API_KEY || '');
+  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('GEMINI_API_KEY') || import.meta.env.VITE_GEMINI_API_KEY || '');
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [recipeCardImages, setRecipeCardImages] = useState<Record<string, string>>({});
@@ -2016,8 +2009,8 @@ export default function App() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Card className="p-4 bg-blue-50 border-blue-100 shadow-none">
               <p className="text-[10px] font-bold uppercase tracking-wider text-blue-700">Smart Cost Intelligence</p>
-              <p className="text-2xl font-bold text-blue-900 mt-1">₹{estimateRecipeCost(selectedRecipe.ingredients.length).toLocaleString('en-IN')}</p>
-              <p className="text-xs text-blue-700 mt-1">Estimated total based on ingredient count and pantry-adjusted baseline.</p>
+              <p className="text-2xl font-bold text-blue-900 mt-1">₹{estimateRecipeCost(selectedRecipe, PantryService.getPantry()).toLocaleString('en-IN')}</p>
+              <p className="text-xs text-blue-700 mt-1">Estimated total based on local ingredient pricing and pantry-aware adjustments.</p>
             </Card>
             <Card className="p-4 bg-emerald-50 border-emerald-100 shadow-none">
               <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Precision Cook Timeline</p>
