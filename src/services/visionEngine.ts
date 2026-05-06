@@ -42,6 +42,7 @@ const NON_FOOD_LABEL_HINTS = [
 const MIN_HF_SCORE = 0.1;
 const MIN_FINAL_CONFIDENCE = 0.08;
 const MIN_RECOVERY_CONFIDENCE = 0.05;
+const HF_FOOD_DETECTION_MODEL = "https://api-inference.huggingface.co/models/BinhQuocNguyen/food-recognition-model";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -147,10 +148,12 @@ export class VisionEngine {
 
     // Stage 1: Hugging Face Object Detection
     let hfDetections: HfDetection[] = [];
-    const hfToken = process.env.HF_API_TOKEN;
+    const hfToken = import.meta.env.VITE_HF_API_TOKEN || import.meta.env.HF_API_TOKEN;
     
     if (hfToken) {
       try {
+        console.log("🔍 Attempting HF food detection...");
+        
         // Convert base64 to Uint8Array for browser compatibility
         const binaryString = atob(base64Image);
         const bytes = new Uint8Array(binaryString.length);
@@ -158,10 +161,11 @@ export class VisionEngine {
           bytes[i] = binaryString.charCodeAt(i);
         }
 
-        const hfResponse = await fetch(
-          "https://api-inference.huggingface.co/models/valentina/food-object-detection",
-          {
-            headers: { Authorization: `Bearer ${hfToken}` },
+        const hfResponse = await fetch(HF_FOOD_DETECTION_MODEL, {
+            headers: { 
+              Authorization: `Bearer ${hfToken}`,
+              "Content-Type": "application/octet-stream"
+            },
             method: "POST",
             body: bytes,
           }
@@ -169,13 +173,17 @@ export class VisionEngine {
         if (hfResponse.ok) {
           const raw = await hfResponse.json();
           hfDetections = parseHfDetections(raw);
+          console.log("✅ HF Detection successful:", hfDetections.length, "items found");
         } else {
           const message = await hfResponse.text();
-          console.warn("HF Detection request failed:", hfResponse.status, message);
+          console.warn("⚠️ HF Detection failed:", hfResponse.status, message.substring(0, 100));
+          console.log("📌 Falling back to Gemini only");
         }
       } catch (e) {
-        console.error("HF Detection failed:", e);
+        console.error("❌ HF Detection error:", e);
       }
+    } else {
+      console.log("ℹ️ HF_API_TOKEN not configured - using Gemini only");
     }
 
     // Stage 2: Gemini Enrichment
@@ -304,7 +312,7 @@ Return JSON with:
         } as Ingredient;
       });
 
-    const geminiNameSet = new Set(enrichedGemini.map((ing) => normalizeName(ing.name)));
+    const geminiNameSet = new Set(enrichedGemini.map((ing: Ingredient) => normalizeName(ing.name)));
     const hfFallbackIngredients: Ingredient[] = hfDetections
       .filter((hf) => !geminiNameSet.has(normalizeName(hf.label)))
       .map((hf, index) => {
